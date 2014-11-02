@@ -1,39 +1,56 @@
 var xal = require('../../xal-javascript');
 var _ = require('underscore');
 
-var mostProbableDestinations = {};
-
 var lastDestinationAgent = null;
-var lastDestinationCertainty = 1.0;
+var lastDestinationCertainty = 0.0;
 
-function finalizeIfNecessary(id, oldValue, certainty) {
-    return function() {
-        if (mostProbableDestinations[id] &&
-            mostProbableDestinations[id] === oldValue) {
-            xal.log.info({id: id, value: oldValue}, 'finalizing destination for event');
-            xal.updateEvent(id, 'xi.event.input.destination', {value: oldValue, certainty: 1.0});
-            lastDestinationAgent =  oldValue;
-            lastDestinationCertainty = certainty || 1.0;
-        }
-    };
+function updateDestinationEstimate(id, oldValue, certainty) {
+    xal.log.info({id: id, value: oldValue}, 'updating destination for event');
+    xal.updateEvent(id, 'xi.event.input.destination', {value: oldValue, certainty: certainty || 1.0});
+    lastDestinationAgent =  oldValue;
+    lastDestinationCertainty = certainty || 1.0;
 }
 
-xal.on('xi.event.input.destination', function(state, next) {
-    var destinations = state.get('xi.event.input.destination');
-    var id = state.get('xi.event.id');
-    var mpd = _.reduce(destinations, function(memo, dest) {
-        if (dest.certainty > memo.certainty) {
-            memo = dest;
+function mostProbable(values) {
+    return _.reduce(values, function(memo, value) {
+        if (value.certainty > memo.certainty) {
+            memo = value;
         }
         return memo;
     });
-    if (mpd) {
-        mostProbableDestinations[id] = mpd.value;
-        setTimeout(finalizeIfNecessary(id, mpd.value, mpd.certainty), 1000);
-    } else {
-        delete mostProbableDestinations[id];
+}
+
+xal.on('xi.event.input.destination', function(state, next) {
+
+    var id = state.get('xi.event.id');
+
+    // try to finalize destination based on agent proposals
+    var destinations = state.get('xi.event.input.destination');
+    if (destinations) {
+        // clear previous updates to destination by InputManager
+        // TODO: Implement state.delete :P
+        state.put('xi.event.input.destination', {
+            value: null,
+            certainty: 0
+        });
+        var mpd = mostProbable(destinations);
+        if (mpd) {
+            updateDestinationEstimate(id, mpd.value, mpd.certainty);
+        }
     }
     next(state);
+});
+
+xal.on('xi.event.output', function(state, next) {
+    // TODO: Handle different kinds of output
+    output = mostProbable(state.get('xi.event.output.text'));
+    if (output) {
+        lastDestinationAgent = output.source;
+        lastDestinationCertainty = output.certainty;
+        xal.log.info({lastDestinationAgent: lastDestinationAgent,
+                      lastDestinationCertainty: lastDestinationCertainty},
+                     "Updated last agent based on output");
+    }
 });
 
 // Send input events to the agent that we last set,
@@ -41,7 +58,8 @@ xal.on('xi.event.input.destination', function(state, next) {
 // This is to have a 'conversation' like behavior.
 
 xal.on('xi.event.input', function(state, next) {
-    if (lastOutputAgent && lastDestinationCertainty > 0) {
+    var destinations = state.get('xi.event.input.destination');
+    if (!destinations && lastDestinationAgent && lastDestinationCertainty > 0) {
         state.put('xi.event.input.destination', {
             value: lastDestinationAgent,
             certainty: lastDestinationCertainty
@@ -61,6 +79,6 @@ function decayCertainty() {
     }
 }
 
-setInterval(decayCertainty, 5000);
+setInterval(decayCertainty, 10 * 1000);
 
 xal.start({name: 'InputManager'});
